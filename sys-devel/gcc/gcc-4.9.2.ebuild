@@ -20,11 +20,9 @@ inherit multilib eutils pax-utils
 #
 # x86/amd64 architecture support only (for now).
 # mudflap is enabled by default.
-# lto is disabled by default.
 # test is not currently supported.
 # objc-gc is enabled by default when objc is enabled.
 # gcj is not currently supported by this ebuild.
-# graphite is not currently supported by this ebuild.
 # multislot is a good USE flag to set when testing this ebuild;
 #  (It allows this gcc to co-exist along identical x.y versions.)
 # hardened is now supported, but we have deprecated the nopie and
@@ -215,6 +213,7 @@ src_configure() {
 	confgcc+=" --enable-languages=${GCC_LANG} --disable-libgcj"
 	confgcc+=" $(use_enable hardened esp)"
 	confgcc+=" $(use_enable sanitize libsanitizer)"
+	use graphite && confgcc+=( --disable-isl-version-check )
 
 	use libssp || export gcc_cv_libc_provides_ssp=yes
 
@@ -283,13 +282,12 @@ src_configure() {
 		--enable-clocale=gnu \
 		--host=$CHOST \
 		--build=$CHOST \
-		--disable-ppl \
-		$(use_with graphite cloog) \
 		--with-system-zlib \
 		--enable-obsolete \
 		--disable-werror \
 		--enable-secureplt \
 		--enable-lto \
+		$(use_with graphite cloog) \
 		--with-bugurl=http://bugs.funtoo.org \
 		--with-pkgversion="$branding" \
 		--with-mpfr-include=${S}/mpfr/src \

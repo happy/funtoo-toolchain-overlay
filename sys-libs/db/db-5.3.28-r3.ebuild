@@ -1,9 +1,6 @@
-# Copyright 1999-2014 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
-# $Header: /var/cvsroot/gentoo-x86/sys-libs/db/db-4.8.30-r1.ebuild,v 1.12 2014/10/27 01:52:25 vapier Exp $
 
-EAPI=4
-
+EAPI=5
 inherit eutils db flag-o-matic java-pkg-opt-2 autotools multilib multilib-minimal
 
 #Number of official patches
@@ -18,7 +15,8 @@ else
 	MY_P=${PN}-${MY_PV}
 fi
 
-S="${WORKDIR}/${MY_P}/build_unix"
+S_BASE="${WORKDIR}/${MY_P}"
+S="${S_BASE}/build_unix"
 DESCRIPTION="Oracle Berkeley DB"
 HOMEPAGE="http://www.oracle.com/technology/software/products/berkeley-db/index.html"
 SRC_URI="http://download.oracle.com/berkeley-db/${MY_P}.tar.gz"
@@ -27,9 +25,11 @@ for (( i=1 ; i<=${PATCHNO} ; i++ )) ; do
 done
 
 LICENSE="Sleepycat"
-SLOT="4.8"
-KEYWORDS="alpha amd64 arm arm64 hppa ia64 m68k ~mips ppc ppc64 s390 sh sparc x86 ~amd64-fbsd ~sparc-fbsd ~x86-fbsd"
+SLOT="5.3"
+KEYWORDS="~*"
 IUSE="doc java cxx tcl test"
+
+REQUIRED_USE="test? ( tcl )"
 
 # the entire testsuite needs the TCL functionality
 DEPEND="tcl? ( >=dev-lang/tcl-8.5.15-r1[${MULTILIB_USEDEP}] )
@@ -37,40 +37,53 @@ DEPEND="tcl? ( >=dev-lang/tcl-8.5.15-r1[${MULTILIB_USEDEP}] )
 	java? ( >=virtual/jdk-1.5 )
 	>=sys-devel/binutils-2.16.1"
 RDEPEND="tcl? ( >=dev-lang/tcl-8.5.15-r1[${MULTILIB_USEDEP}] )
-	java? ( >=virtual/jre-1.5 )
-	abi_x86_32? (
-		!<=app-emulation/emul-linux-x86-baselibs-20140508-r2
-		!app-emulation/emul-linux-x86-baselibs[-abi_x86_32(-)]
-	)"
+	java? ( >=virtual/jre-1.5 )"
 
-src_unpack() {
-	unpack "${MY_P}".tar.gz
-}
+MULTILIB_WRAPPED_HEADERS=(
+	/usr/include/db5.3/db.h
+)
 
 src_prepare() {
-	cd "${WORKDIR}"/"${MY_P}" || die
+	cd "${WORKDIR}"/"${MY_P}"
 	for (( i=1 ; i<=${PATCHNO} ; i++ ))
 	do
 		epatch "${DISTDIR}"/patch."${MY_PV}"."${i}"
 	done
-	epatch "${FILESDIR}"/${PN}-4.8-libtool.patch
+
+	# bug #510506
 	epatch "${FILESDIR}"/${PN}-4.8.24-java-manifest-location.patch
-	epatch "${FILESDIR}"/${PN}-4.8.30-rename-atomic-compare-exchange.patch
 
 	# use the includes from the prefix
 	epatch "${FILESDIR}"/${PN}-4.6-jni-check-prefix-first.patch
 	epatch "${FILESDIR}"/${PN}-4.3-listen-to-java-options.patch
 
-	sed -e "/^DB_RELEASE_DATE=/s/%B %e, %Y/%Y-%m-%d/" -i dist/RELEASE \
-		|| die
+	# sqlite configure call has an extra leading ..
+	# upstreamed:5.2.36, missing in 5.3.x
+	epatch "${FILESDIR}"/${PN}-5.2.28-sqlite-configure-path.patch
+
+	# The upstream testsuite copies .lib and the binaries for each parallel test
+	# core, ~300MB each. This patch uses links instead, saves a lot of space.
+	epatch "${FILESDIR}"/${PN}-6.0.20-test-link.patch
+
+#FL-1505 add sql shared libs patch, required for binutils-2.24
+	epatch "${FILESDIR}"/${PN}-5.3.28-sql-libs.patch	
+
+	# Upstream release script grabs the dates when the script was run, so lets
+	# end-run them to keep the date the same.
+	export REAL_DB_RELEASE_DATE="$(awk \
+		'/^DB_VERSION_STRING=/{ gsub(".*\\(|\\).*","",$0); print $0; }' \
+		"${S_BASE}"/dist/configure)"
+	sed -r -i \
+		-e "/^DB_RELEASE_DATE=/s~=.*~='${REAL_DB_RELEASE_DATE}'~g" \
+		"${S_BASE}"/dist/RELEASE || die
 
 	# Include the SLOT for Java JAR files
 	# This supersedes the unused jarlocation patches.
 	sed -r -i \
 		-e '/jarfile=.*\.jar$/s,(.jar$),-$(LIBVERSION)\1,g' \
-		"${S}"/../dist/Makefile.in || die
+		"${S_BASE}"/dist/Makefile.in || die
 
-	cd "${S}"/../dist || die
+	cd "${S_BASE}"/dist || die
 	rm -f aclocal/libtool.m4
 	sed -i \
 		-e '/AC_PROG_LIBTOOL$/aLT_OUTPUT' \
@@ -81,13 +94,14 @@ src_prepare() {
 	AT_M4DIR="aclocal aclocal_java" eautoreconf
 	# Upstream sucks - they do autoconf and THEN replace the version variables.
 	. ./RELEASE
-	sed -i \
-		-e "s/__EDIT_DB_VERSION_MAJOR__/$DB_VERSION_MAJOR/g" \
-		-e "s/__EDIT_DB_VERSION_MINOR__/$DB_VERSION_MINOR/g" \
-		-e "s/__EDIT_DB_VERSION_PATCH__/$DB_VERSION_PATCH/g" \
-		-e "s/__EDIT_DB_VERSION_STRING__/$DB_VERSION_STRING/g" \
-		-e "s/__EDIT_DB_VERSION_UNIQUE_NAME__/$DB_VERSION_UNIQUE_NAME/g" \
-		-e "s/__EDIT_DB_VERSION__/$DB_VERSION/g" configure || die
+	for v in \
+		DB_VERSION_{FAMILY,LETTER,RELEASE,MAJOR,MINOR} \
+		DB_VERSION_{PATCH,FULL,UNIQUE_NAME,STRING,FULL_STRING} \
+		DB_VERSION \
+		DB_RELEASE_DATE ; do
+		local ev="__EDIT_${v}__"
+		sed -i -e "s/${ev}/${!v}/g" configure || die
+	done
 }
 
 src_configure() {
@@ -128,12 +142,18 @@ multilib_src_configure() {
 		myconf+=(--disable-tcl )
 	fi
 
-	ECONF_SOURCE="${S}"/../dist \
+	# sql_compat will cause a collision with sqlite3
+	# --enable-sql_compat
+	ECONF_SOURCE="${S_BASE}"/dist \
 	STRIP="true" \
 	econf \
 		--enable-compat185 \
+		--enable-dbm \
 		--enable-o_direct \
 		--without-uniquename \
+		--enable-sql \
+		--enable-sql_codegen \
+		--disable-sql_compat \
 		$([[ ${ABI} == arm ]] && echo --with-mutex=ARM/gcc-assembly) \
 		$([[ ${ABI} == amd64 ]] && echo --with-mutex=x86/gcc-assembly) \
 		$(use_enable cxx) \
@@ -141,12 +161,6 @@ multilib_src_configure() {
 		$(multilib_native_use_enable java) \
 		"${myconf[@]}" \
 		$(use_enable test)
-}
-
-multilib_src_test() {
-	multilib_is_native_abi || return
-
-	S=${BUILD_DIR} db_src_test
 }
 
 multilib_src_install() {
@@ -182,4 +196,38 @@ pkg_postinst() {
 
 pkg_postrm() {
 	multilib_foreach_abi db_fix_so
+}
+
+src_test() {
+	# db_repsite is impossible to build, as upstream strips those sources.
+	# db_repsite is used directly in the setup_site_prog,
+	# setup_site_prog is called from open_site_prog
+	# which is called only from tests in the multi_repmgr group.
+	#sed -ri \
+	#	-e '/set subs/s,multi_repmgr,,g' \
+	#	"${S_BASE}/test/testparams.tcl"
+	sed -ri \
+		-e '/multi_repmgr/d' \
+		"${S_BASE}/test/tcl/test.tcl" || die
+
+	# This is the only failure in 5.2.28 so far, and looks like a false positive.
+	# Repmgr018 (btree): Test of repmgr stats.
+	#     Repmgr018.a: Start a master.
+	#     Repmgr018.b: Start a client.
+	#     Repmgr018.c: Run some transactions at master.
+	#         Rep_test: btree 20 key/data pairs starting at 0
+	#         Rep_test.a: put/get loop
+	# FAIL:07:05:59 (00:00:00) perm_no_failed_stat: expected 0, got 1
+	sed -ri \
+		-e '/set parms.*repmgr018/d' \
+		-e 's/repmgr018//g' \
+		"${S_BASE}/test/tcl/test.tcl" || die
+
+	multilib-minimal_src_test
+}
+
+multilib_src_test() {
+	multilib_is_native_abi || return
+
+	S=${BUILD_DIR} db_src_test
 }

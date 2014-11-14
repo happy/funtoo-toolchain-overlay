@@ -2,7 +2,7 @@
 # Distributed under the terms of the GNU General Public License v2
 # $Header: /var/cvsroot/gentoo-x86/sys-libs/glibc/files/eblits/src_unpack.eblit,v 1.27 2014/09/10 05:59:03 vapier Exp $
 
-[[ ${EAPI:-0} == [01] ]] && source "${FILESDIR}/eblits-${EBLIT_VER}/src_prepare.eblit"
+[[ ${EAPI:-0} == [01] ]] && source "${FILESDIR}/eblits/src_prepare.eblit"
 
 int_to_KV() {
 	local version=$1 major minor micro

@@ -85,15 +85,32 @@ RDEPEND="sys-libs/zlib nls? ( sys-devel/gettext ) virtual/libiconv"
 DEPEND="${RDEPEND} >=sys-devel/bison-1.875 >=sys-devel/flex-2.5.4 elibc_glibc? ( >=sys-libs/glibc-2.8 ) >=sys-devel/binutils-2.18"
 PDEPEND=">=sys-devel/gcc-config-1.5 >=sys-devel/libtool-2.4.3 elibc_glibc? ( >=sys-libs/glibc-2.8 )"
 
+tc-is-cross-compiler() {
+	[[ ${CBUILD}:-${CHOST}} != ${CHOST} ]]
+}
+
+is_crosscompile() {
+	[[ ${CHOST} != ${CTARGET} ]]
+}
+
 pkg_setup() {
 	unset GCC_SPECS # we don't want to use the installed compiler's specs to build gcc!
 	unset LANGUAGES #265283
 	PREFIX=/usr
-	CTARGET=$CHOST
+	CTARGET=${CTARGET:-${CHOST}}
 	GCC_BRANCH_VER=${SLOT}
 	GCC_CONFIG_VER=${PV}
 	DATAPATH=${PREFIX}/share/gcc-data/${CTARGET}/${GCC_CONFIG_VER}
-	BINPATH=${PREFIX}/${CTARGET}/gcc-bin/${GCC_CONFIG_VER}
+	if is_crosscompile; then
+		BINPATH=${PREFIX}/${CHOST}/${CTARGET}/gcc-bin/${GCC_CONFIG_VER}
+		CFLAGS="-O2 -pipe"
+		FFLAGS="$CFLAGS"
+		FCFLAGS="$CFLAGS"
+		CXXFLAGS="$CFLAGS"
+	else
+		BINPATH=${PREFIX}/${CTARGET}/gcc-bin/${GCC_CONFIG_VER}
+		[[ {$CATEGORY/cross-} != ${CATEGORY} ]] && CTARGET=${CATEGORY/cross-}
+	fi
 	LIBPATH=${PREFIX}/lib/gcc/${CTARGET}/${GCC_CONFIG_VER}
 	STDCXX_INCDIR=${LIBPATH}/include/g++-v${GCC_BRANCH_VER}
 }
@@ -190,8 +207,38 @@ src_prepare() {
 }
 
 src_configure() {
-	# Determine language support:
 	local confgcc
+	if is_crosscompile || tc-is-cross-compiler; then
+		confgcc+=" --target=${CTARGET}"
+	fi
+	if is_crosscompile; then
+		case ${CTARGET} in
+			*-linux)			needed_libc=no-idea;;
+			*-dietlibc)			needed_libc=dietlibc;;
+			*-elf|*-eabi)		needed_libc=newlib;;
+			*-freebsd*)			needed_libc=freebsd-lib;;
+			*-gnu*)				needed_libc=glibc;;
+			*-klibc)			needed_libc=klibc;;
+			*-musl*)			needed_libc=musl;;
+			*-uclibc*)			needed_libc=uclibc;;
+		esac
+		confgcc+=" --disable-bootstrap --enable-poision-system-directories"
+		if ! has_version ${CATEGORY}/${needed_libc}; then
+			# we are building with libc that is not installed:
+			confgcc+=" --disable-shared --disable-libatomic --disable-threads --without-headers"
+		elif built_with_use --hidden --missing false ${CATEGORY}/${needed_libc} crosscompile_opts_headers-only; then
+			# libc installed, but has USE="crosscompile_opts_headers-only" to only install headers:
+			confgcc+=" --disable-shared --disable-libatomic --with-sysroot=${PREFIX}/${CTARGET}"
+		else
+			# libc is installed:
+			confgcc+=" --with-sysroot=${PREFIX}/${CTARGET}"
+		fi
+		confgcc+=" --disable-libgomp"
+	else
+		confgcc+=" $(use_enable openmp libgomp)"
+	fi
+	[[ -n ${CBUILD} ]] && confgcc+=" --build=${CBUILD}"
+	# Determine language support:
 	local GCC_LANG="c,c++"
 	if use objc; then
 		GCC_LANG+=",objc"
@@ -200,7 +247,6 @@ src_configure() {
 	fi
 	use fortran && GCC_LANG+=",fortran" || confgcc+=" --disable-libquadmath"
 	use go && GCC_LANG+=",go"
-	confgcc+=" $(use_enable openmp libgomp)"
 	confgcc+=" --enable-languages=${GCC_LANG} --disable-libgcj"
 	confgcc+=" $(use_enable hardened esp)"
 
@@ -303,8 +349,11 @@ src_configure() {
 src_compile() {
 	cd $WORKDIR/objdir
 	unset ABI
-
-	emake LIBPATH="${LIBPATH}" bootstrap-lean || die "compile fail"
+	if is_crosscompile || tc-is-cross-compiler; then
+		emake LIBPATH="${LIBPATH}" all || die "compile fail"
+	else
+		emake LIBPATH="${LIBPATH}" bootstrap-lean || die "compile fail"
+	fi
 }
 
 create_gcc_env_entry() {
@@ -342,8 +391,10 @@ linkify_compiler_binaries() {
 		[[ -f ${x} ]] && mv ${x} ${CTARGET}-${x}
 
 		if [[ -f ${CTARGET}-${x} ]] ; then
-			ln -sf ${CTARGET}-${x} ${x}
-			dosym ${BINPATH}/${CTARGET}-${x} /usr/bin/${x}-${GCC_CONFIG_VER}
+			if ! is_crosscompile; then
+				ln -sf ${CTARGET}-${x} ${x}
+				dosym ${BINPATH}/${CTARGET}-${x} /usr/bin/${x}-${GCC_CONFIG_VER}
+			fi
 			# Create version-ed symlinks
 			dosym ${BINPATH}/${CTARGET}-${x} /usr/bin/${CTARGET}-${x}-${GCC_CONFIG_VER}
 		fi
@@ -403,9 +454,11 @@ src_install() {
 # POST MAKE INSTALL SECTION:
 
 	# Basic sanity check
-	local EXEEXT
-	eval $(grep ^EXEEXT= "${WORKDIR}"/objdir/gcc/config.log)
-	[[ -r ${D}${BINPATH}/gcc${EXEEXT} ]] || die "gcc not found in ${D}"
+	if ! is_crosscompile; then
+		local EXEEXT
+		eval $(grep ^EXEEXT= "${WORKDIR}"/objdir/gcc/config.log)
+		[[ -r ${D}${BINPATH}/gcc${EXEEXT} ]] || die "gcc not found in ${D}"
+	fi
 
 # GENTOO ENV SETUP
 
@@ -431,14 +484,18 @@ src_install() {
 	find "${D}" -depth -type d -delete 2>/dev/null
 	# ownership fix:
 	chown -R root:0 "${D}"${LIBPATH} 2>/dev/null
-	find "${D}/${LIBPATH}" -name libstdc++.la -type f -exec rm "{}" \;
-	find "${D}/${LIBPATH}" -name "*.py" -type f -exec rm "{}" \;
-
 	linkify_compiler_binaries
 	tasteful_stripping
-	doc_cleanups
-	exeinto "${DATAPATH}"
-	doexe "${FILESDIR}"/c{89,99} || die
+	if is_crosscompile; then
+		rm -rf "${D}"/usr/share/{man,info}
+		rm -rf "${D}"${DATAPATH}/{man,info}
+	else
+		find "${D}/${LIBPATH}" -name libstdc++.la -type f -exec rm "{}" \;
+		find "${D}/${LIBPATH}" -name "*.py" -type f -exec rm "{}" \;
+		doc_cleanups
+		exeinto "${DATAPATH}"
+		doexe "${FILESDIR}"/c{89,99} || die
+	fi
 
 	# Don't scan .gox files for executable stacks - false positives
 	if use go; then
@@ -449,6 +506,18 @@ src_install() {
 	# Disable RANDMMAP so PCH works.
 	pax-mark -r "${D}${PREFIX}/libexec/gcc/${CTARGET}/${GCC_CONFIG_VER}/cc1"
 	pax-mark -r "${D}${PREFIX}/libexec/gcc/${CTARGET}/${GCC_CONFIG_VER}/cc1plus"
+}
+
+pkg_postrm() {
+	# clean up the cruft left behind by cross-compilers
+	if is_crosscompile ; then
+		if [[ -z $(ls "${ROOT}"/etc/env.d/gcc/${CTARGET}* 2>/dev/null) ]] ; then
+			rm -f "${ROOT}"/etc/env.d/gcc/config-${CTARGET}
+			rm -f "${ROOT}"/etc/env.d/??gcc-${CTARGET}
+			rm -f "${ROOT}"/usr/bin/${CTARGET}-{gcc,{g,c}++}{,32,64}
+		fi
+		return 0
+	fi
 }
 
 pkg_postinst() {

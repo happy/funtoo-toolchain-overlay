@@ -384,29 +384,24 @@ create_gcc_env_entry() {
 
 linkify_compiler_binaries() {
 	dodir /usr/bin
-	cd "${D}"${BINPATH}
-	# Ugh: we really need to auto-detect this list.
-	#      It's constantly out of date.
+	cd "${D}${BINPATH}" || die
 
-	local binary_languages="cpp gcc g++ c++ gcov"
+	# First, remove all default hardlinks (we have all files
+	# unprefixed anyway).
+	rm "${CTARGET}"-* || die
 
-	use go && binary_languages="${binary_languages} gccgo"
-	use fortran && binary_languages="${binary_languages} gfortran"
+	# Replace c++ hardlink with symlink. We can't drop it since
+	# gcc-wrapper doesn't have an alias for it...
+	ln -f -s g++ c++ || die
 
-	for x in ${binary_languages} ; do
-		[[ -f ${x} ]] && mv ${x} ${CTARGET}-${x}
+	local t
+	for t in *; do
+		# Add CTARGET-ed symlinks to make gcc-wrapper happy.
+		ln -s "${t}" "${CTARGET}-${t}" || die
 
-		if [[ -f ${CTARGET}-${x} ]] ; then
-			ln -sf ${CTARGET}-${x} ${x}
-			dosym ${BINPATH}/${CTARGET}-${x} /usr/bin/${x}-${GCC_CONFIG_VER}
-			# Create version-ed symlinks
-			dosym ${BINPATH}/${CTARGET}-${x} /usr/bin/${CTARGET}-${x}-${GCC_CONFIG_VER}
-		fi
-
-		if [[ -f ${CTARGET}-${x}-${GCC_CONFIG_VER} ]] ; then
-			rm -f ${CTARGET}-${x}-${GCC_CONFIG_VER}
-			ln -sf ${CTARGET}-${x} ${CTARGET}-${x}-${GCC_CONFIG_VER}
-		fi
+		# Install versioned symlinks in /usr/bin.
+		dosym "${BINPATH}/${t}" /usr/bin/"${CTARGET}-${t}-${GCC_CONFIG_VER}"
+		dosym "${CTARGET}-${t}-${GCC_CONFIG_VER}" /usr/bin/"${t}-${GCC_CONFIG_VER}"
 	done
 }
 

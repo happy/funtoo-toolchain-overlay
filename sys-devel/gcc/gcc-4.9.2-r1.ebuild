@@ -201,6 +201,9 @@ src_prepare() {
 			sed -i -e "/^HARD_CFLAGS = /s|=|= ${gcc_hard_flags} |" "${S}"/gcc/Makefile.in || die
 		fi
 	fi
+
+	# we don't want fixed includes :)
+	echo : > "${S}"/fixincludes/fixinc.in
 }
 
 # Map Gentoo ABI into gcc ABI, for amd64.
@@ -472,20 +475,6 @@ doc_cleanups() {
 
 src_install() {
 	S=$WORKDIR/objdir; cd $S
-
-# PRE-MAKE INSTALL SECTION:
-
-	# from toolchain eclass:
-	# Do allow symlinks in private gcc include dir as this can break the build
-	find gcc/include*/ -type l -delete
-
-	# Remove generated headers, as they can cause things to break
-	# (ncurses, openssl, etc).
-	while read x; do
-		grep -q 'It has been auto-edited by fixincludes from' "${x}" \
-			&& echo "Removing auto-generated header: $x" \
-			&& rm -f "${x}"
-	done < <(find gcc/include*/ -name '*.h')
 
 # MAKE INSTALL SECTION:
 

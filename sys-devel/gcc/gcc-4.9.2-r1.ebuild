@@ -364,21 +364,25 @@ src_compile() {
 
 create_gcc_env_entry() {
 	dodir /etc/env.d/gcc
-	local gcc_envd_base="/etc/env.d/gcc/${CTARGET}-${GCC_CONFIG_VER}"
+	# within multilib_foreach_abi(), CHOST matches the target
+	local gcc_envd_base="/etc/env.d/gcc/${CHOST}-${GCC_CONFIG_VER}"
 	local gcc_envd_file="${D}${gcc_envd_base}"
+	local abi_binpath=${PREFIX}/${CHOST}/gcc-bin/${PV}
 	if [ -z $1 ]; then
 		gcc_specs_file=""
 	else
 		gcc_envd_file="$gcc_envd_file-$1"
 		gcc_specs_file="${LIBPATH}/$1.specs"
 	fi
+
 	cat <<-EOF > ${gcc_envd_file}
-	GCC_PATH="${BINPATH}"
+	GCC_PATH="${abi_binpath}"
 	LDPATH="${LIBPATH}:${LIBPATH}/32"
 	MANPATH="${DATAPATH}/man"
 	INFOPATH="${DATAPATH}/info"
 	STDCXX_INCDIR="${STDCXX_INCDIR##*/}"
 	GCC_SPECS="${gcc_specs_file}"
+	CTARGET="${CHOST}"
 	EOF
 }
 
@@ -394,8 +398,11 @@ linkify_compiler_binaries() {
 	# gcc-wrapper doesn't have an alias for it...
 	ln -f -s g++ c++ || die
 
+	# Store for reuse in create_multilib_wrapper().
+	GCC_TOOLS=( * )
+
 	local t
-	for t in *; do
+	for t in "${GCC_TOOLS[@]}"; do
 		# Add CTARGET-ed symlinks to make gcc-wrapper happy.
 		ln -s "${t}" "${CTARGET}-${t}" || die
 
@@ -403,6 +410,40 @@ linkify_compiler_binaries() {
 		dosym "${BINPATH}/${t}" /usr/bin/"${CTARGET}-${t}-${GCC_CONFIG_VER}"
 		dosym "${CTARGET}-${t}-${GCC_CONFIG_VER}" /usr/bin/"${t}-${GCC_CONFIG_VER}"
 	done
+}
+
+create_multilib_wrappers() {
+	local native_ctarget=${CTARGET}
+
+	create_multilib_wrapper() {
+		multilib_is_native_abi && continue
+
+		local abi_binpath=${PREFIX}/${CHOST}/gcc-bin/${PV}
+		exeinto "${abi_binpath}"
+		dodir "${abi_binpath}"
+
+		local t
+		for t in "${GCC_TOOLS[@]}"; do
+			if [[ ${t} == gcov || ${t} == gcc-* ]]; then
+				# those tools have no multilib powers, we symlink them as-is
+				dosym "../../../${BINPATH#${PREFIX}/}/${t}" \
+					"${abi_binpath}/${t}" || die
+			else
+				# use canonical name to avoid playing with ${0}
+				cat > "${T}"/wrapper <<-_EOF_
+					#!${EPREFIX}/bin/sh
+					exec "${native_ctarget}-${t}-${PV}" $(get_abi_CFLAGS) "\${@}"
+				_EOF_
+
+				newexe "${T}"/wrapper "${t}"
+			fi
+
+			# Now symlink fun.
+			dosym "${t}" "${abi_binpath}/${CHOST}-${t}" || die
+			dosym "${abi_binpath}/${t}" /usr/bin/"${CHOST}-${t}-${PV}"
+		done
+	}
+	multilib_foreach_abi create_multilib_wrapper
 }
 
 tasteful_stripping() {
@@ -460,13 +501,19 @@ src_install() {
 # GENTOO ENV SETUP
 
 	dodir /etc/env.d/gcc
-	create_gcc_env_entry
+	multilib_env_entries() {
+		create_gcc_env_entry
+
+		if use hardened; then
+			create_gcc_env_entry hardenednopiessp
+			create_gcc_env_entry hardenednopie
+			create_gcc_env_entry hardenednossp
+			create_gcc_env_entry vanilla
+		fi
+	}
+	multilib_foreach_abi multilib_env_entries
 
 	if use hardened; then
-		create_gcc_env_entry hardenednopiessp
-		create_gcc_env_entry hardenednopie
-		create_gcc_env_entry hardenednossp
-		create_gcc_env_entry vanilla
 		insinto ${LIBPATH}
 		doins "${WORKDIR}"/specs/*.specs
 	fi
@@ -485,6 +532,7 @@ src_install() {
 	find "${D}/${LIBPATH}" -name "*.py" -type f -exec rm "{}" \;
 
 	linkify_compiler_binaries
+	create_multilib_wrappers
 	tasteful_stripping
 	doc_cleanups
 	exeinto "${DATAPATH}"
@@ -510,28 +558,31 @@ pkg_postinst() {
 	# and 4.6.10 to exist alongside one another. In this case, the user must
 	# enable this compiler manually.
 
-	local do_config="yes"
-	curr_gcc_config=$(env -i ROOT="${ROOT}" gcc-config -c ${CTARGET} 2>/dev/null)
-	if [ -n "$curr_gcc_config" ]; then
-		CURR_GCC_CONFIG_VER=$(gcc-config -S ${curr_gcc_config} | awk '{print $2}')
-		if [ "${CURR_GCC_CONFIG_VER%%.*}" != "${GCC_CONFIG_VER%%.*}" ]; then
-			# major versions don't match, don't run gcc-config
-			do_config="no"
+	multilib_pkg_postinst() {
+		local do_config="yes"
+		curr_gcc_config=$(env -i ROOT="${ROOT}" gcc-config -c "${CHOST}" 2>/dev/null)
+		if [ -n "$curr_gcc_config" ]; then
+			CURR_GCC_CONFIG_VER=$(gcc-config -S ${curr_gcc_config} | awk '{print $2}')
+			if [ "${CURR_GCC_CONFIG_VER%%.*}" != "${GCC_CONFIG_VER%%.*}" ]; then
+				# major versions don't match, don't run gcc-config
+				do_config="no"
+			fi
+			use multislot && do_config="no"
 		fi
-		use multislot && do_config="no"
-	fi
-	if [ "$do_config" == "yes" ]; then
-		gcc-config ${CTARGET}-${GCC_CONFIG_VER}
-	else
-		einfo "This does not appear to be a regular upgrade of gcc, so"
-		einfo "gcc ${GCC_CONFIG_VER} will not be automatically enabled as the"
-		einfo "default system compiler."
-		echo
-		einfo "If you would like to make ${GCC_CONFIG_VER} the default system"
-		einfo "compiler, then perform the following steps as root:"
-		echo
-		einfo "gcc-config ${CTARGET}-${GCC_CONFIG_VER}"
-		einfo "source /etc/profile"
-		echo
-	fi
+		if [ "$do_config" == "yes" ]; then
+			gcc-config "${CHOST}-${GCC_CONFIG_VER}"
+		else
+			einfo "This does not appear to be a regular upgrade of gcc, so"
+			einfo "gcc ${GCC_CONFIG_VER} will not be automatically enabled as the"
+			einfo "default system compiler."
+			echo
+			einfo "If you would like to make ${GCC_CONFIG_VER} the default system"
+			einfo "compiler, then perform the following steps as root:"
+			echo
+			einfo "gcc-config ${CHOST}-${GCC_CONFIG_VER}"
+			einfo "source /etc/profile"
+			echo
+		fi
+	}
+	multilib_foreach_abi multilib_pkg_postinst
 }

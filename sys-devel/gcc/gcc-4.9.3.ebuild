@@ -528,7 +528,7 @@ pkg_postinst() {
 		else
 			# major versions match -- but if minor version of existing is greater, don't do gcc config
 			CURR_MINOR="${CURR_MAJOR%%.*}"
-			MINOR="${CURR_MAJOR%%.*}"
+			MINOR="${MAJOR%%.*}"
 			if [ "${CURR_MINOR}" -gt "${MINOR}" ]; then
 				do_config="yes"
 			elif [ "${CURR_MINOR}" -lt "${MINOR}" ]; then
